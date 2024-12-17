@@ -1,0 +1,253 @@
+import pygame
+import numpy as np
+import sounddevice as sd
+import threading
+
+##############################
+# CONFIGURATIONS
+##############################
+
+WINDOW_WIDTH = 800
+WINDOW_HEIGHT = 600
+FPS = 60
+
+CHICKEN_X = 100
+CHICKEN_Y_START = 300
+CHICKEN_WIDTH = 50
+CHICKEN_HEIGHT = 50
+
+BASE_GRAVITY = 2.0
+GRAVITY_MULTIPLIER_DOWN = 1.5
+FORCE_MULTIPLIER = 100
+VOICE_THRESHOLD = 0.001
+
+GROUND_HEIGHT = 50
+GROUND_SCROLL_SPEED = 3
+
+# Knives configuration
+KNIFE_SCROLL_SPEED = 3
+KNIFE_SCALE_FACTOR = 2.0  # Increase this to make knives larger
+knives = [
+    # (x, y, w, h) - the w,h are base sizes. Will be scaled by KNIFE_SCALE_FACTOR
+    (900, 150, 40, 30),
+    (1200, 100, 40, 30),
+    (1500, 200, 40, 30)
+]
+
+# Audio settings
+SAMPLE_RATE = 44100
+BLOCK_SIZE = 1024
+
+##############################
+# GROUND AND HOLES
+##############################
+
+holes = [
+    (500, 50),
+]
+
+ground_positions = [0, WINDOW_WIDTH]
+
+##############################
+# GLOBALS
+##############################
+
+chicken_y = float(CHICKEN_Y_START)
+chicken_velocity = 0.0
+game_over = False
+
+# Audio amplitude (shared by the audio callback)
+current_amplitude = 0.0
+amplitude_lock = threading.Lock()
+
+##############################
+# AUDIO CALLBACK
+##############################
+
+def audio_callback(indata, frames, time, status):
+    global current_amplitude
+    amplitude = np.sqrt(np.mean(indata**2))
+    with amplitude_lock:
+        current_amplitude = amplitude
+
+##############################
+# GET CURRENT AMPLITUDE
+##############################
+
+def get_amplitude():
+    with amplitude_lock:
+        return current_amplitude
+
+##############################
+# INITIALIZE PYGAME
+##############################
+
+pygame.init()
+screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+pygame.display.set_caption("Voice-Controlled Chicken Jump with Larger Knives")
+clock = pygame.time.Clock()
+
+font = pygame.font.SysFont(None, 36)
+
+# Load images
+chicken_image = pygame.image.load("chicken.png").convert_alpha()
+chicken_image = pygame.transform.scale(chicken_image, (CHICKEN_WIDTH, CHICKEN_HEIGHT))
+
+knife_image = pygame.image.load("knifes.png").convert_alpha()
+
+##############################
+# START AUDIO STREAM
+##############################
+
+try:
+    stream = sd.InputStream(callback=audio_callback, channels=1, samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE)
+    stream.start()
+    mic_available = True
+except Exception as e:
+    print("Microphone not available or another error occurred:", e)
+    mic_available = False
+
+##############################
+# HELPER FUNCTIONS
+##############################
+
+def is_over_hole(x):
+    for gpos in ground_positions:
+        segment_start = gpos
+        segment_end = gpos + WINDOW_WIDTH
+        if CHICKEN_X >= segment_start and CHICKEN_X < segment_end:
+            local_x = CHICKEN_X - segment_start
+            for (hstart, hwidth) in holes:
+                if hstart <= local_x < (hstart + hwidth):
+                    return True
+    return False
+
+def check_game_over():
+    global game_over
+    if chicken_y > WINDOW_HEIGHT:
+        game_over = True
+
+def check_knife_collision():
+    cx1 = CHICKEN_X
+    cy1 = chicken_y
+    cx2 = CHICKEN_X + CHICKEN_WIDTH
+    cy2 = chicken_y + CHICKEN_HEIGHT
+
+    for (kx, ky, kw, kh) in knives:
+        kx1 = kx
+        ky1 = ky
+        kx2 = kx + kw * KNIFE_SCALE_FACTOR
+        ky2 = ky + kh * KNIFE_SCALE_FACTOR
+
+        if (cx1 < kx2 and cx2 > kx1 and cy1 < ky2 and cy2 > ky1):
+            return True
+    return False
+
+def scroll_knives():
+    for i in range(len(knives)):
+        kx, ky, kw, kh = knives[i]
+        kx -= KNIFE_SCROLL_SPEED
+        if kx < -kw * KNIFE_SCALE_FACTOR:
+            kx = WINDOW_WIDTH + np.random.randint(200, 400)
+            ky = np.random.randint(50, WINDOW_HEIGHT - GROUND_HEIGHT - 100)
+        knives[i] = (kx, ky, kw, kh)
+
+##############################
+# GAME LOOP
+##############################
+
+running = True
+start_time = pygame.time.get_ticks()
+
+while running:
+    dt = clock.tick(FPS) / 1000.0
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+    elapsed_time = (pygame.time.get_ticks() - start_time) / 1000
+
+    if not game_over:
+        if mic_available:
+            amp = get_amplitude()
+        else:
+            amp = 0.0
+
+        if amp > VOICE_THRESHOLD:
+            chicken_velocity = -amp * FORCE_MULTIPLIER
+
+        if chicken_velocity > 0:
+            chicken_velocity += BASE_GRAVITY * GRAVITY_MULTIPLIER_DOWN
+        else:
+            chicken_velocity += BASE_GRAVITY
+
+        chicken_y += chicken_velocity
+
+        if chicken_y < 0:
+            chicken_y = 0
+            chicken_velocity = 0
+
+        ground_y = WINDOW_HEIGHT - GROUND_HEIGHT
+        if not is_over_hole(CHICKEN_X):
+            if chicken_y + CHICKEN_HEIGHT > ground_y:
+                chicken_y = ground_y - CHICKEN_HEIGHT
+                chicken_velocity = 0
+
+        for i in range(len(ground_positions)):
+            ground_positions[i] -= GROUND_SCROLL_SPEED
+            if ground_positions[i] < -WINDOW_WIDTH:
+                ground_positions[i] += WINDOW_WIDTH * 2
+
+        scroll_knives()
+        if check_knife_collision():
+            game_over = True
+
+        check_game_over()
+    else:
+        pass
+
+    screen.fill((135, 206, 235))
+
+    for gpos in ground_positions:
+        pygame.draw.rect(
+            screen,
+            (34, 139, 34),
+            (int(gpos), int(WINDOW_HEIGHT - GROUND_HEIGHT), int(WINDOW_WIDTH), int(GROUND_HEIGHT))
+        )
+        for (hstart, hwidth) in holes:
+            hole_x = gpos + hstart
+            pygame.draw.rect(
+                screen,
+                (135, 206, 235),
+                (int(hole_x), int(WINDOW_HEIGHT - GROUND_HEIGHT), int(hwidth), int(GROUND_HEIGHT))
+            )
+
+    screen.blit(chicken_image, (int(CHICKEN_X), int(chicken_y)))
+
+    for (kx, ky, kw, kh) in knives:
+        # Scale the knife by KNIFE_SCALE_FACTOR
+        scaled_w = int(kw * KNIFE_SCALE_FACTOR)
+        scaled_h = int(kh * KNIFE_SCALE_FACTOR)
+        scaled_knife = pygame.transform.scale(knife_image, (scaled_w, scaled_h))
+        screen.blit(scaled_knife, (int(kx), int(ky)))
+
+    if not game_over:
+        if elapsed_time < 5:
+            fly_text = font.render("Shout to Fly", True, (255, 0, 0))
+            screen.blit(fly_text, (WINDOW_WIDTH // 2 - 80, WINDOW_HEIGHT // 2 - 20))
+
+        text = font.render(f"Amplitude: {amp:.4f}", True, (0,0,0))
+        screen.blit(text, (10,10))
+    else:
+        go_text = font.render("GAME OVER! Press Q to quit", True, (255,0,0))
+        screen.blit(go_text, (WINDOW_WIDTH//2 - 150, WINDOW_HEIGHT//2))
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_q]:
+            running = False
+
+    pygame.display.flip()
+
+if mic_available:
+    stream.stop()
+    stream.close()
+pygame.quit()
